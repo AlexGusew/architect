@@ -32,7 +32,13 @@ PLATFORM              ?= PLATFORM_DESKTOP
 PROJECT_NAME          ?= project_name
 PROJECT_VERSION       ?= 1.0
 PROJECT_BUILD_PATH    ?= .
-PROJECT_SOURCE_FILES  ?= project_name.cpp
+PROJECT_SOURCE_FILES  ?= project_name.cpp \
+                          ../external/imgui/imgui.cpp \
+                          ../external/imgui/imgui_draw.cpp \
+                          ../external/imgui/imgui_tables.cpp \
+                          ../external/imgui/imgui_widgets.cpp \
+                          ../external/imgui/imgui_demo.cpp \
+                          ../external/rlImGui/rlImGui.cpp
 
 # raylib library variables
 RAYLIB_SRC_PATH       ?= C:/raylib/raylib/src
@@ -191,7 +197,7 @@ endif
 
 # Define include paths for required headers: INCLUDE_PATHS
 #------------------------------------------------------------------------------------------------
-INCLUDE_PATHS += -I. -Iexternal -I$(RAYLIB_INCLUDE_PATH)
+INCLUDE_PATHS += -I. -Iexternal -I../external/rlImGui -I../external/imgui -I$(RAYLIB_INCLUDE_PATH)
 
 # Define additional directories containing required header files
 ifeq ($(PLATFORM),PLATFORM_DRM)
@@ -324,7 +330,7 @@ endif
 
 # Define all object files from source files
 #------------------------------------------------------------------------------------------------
-OBJS = $(patsubst %.c, %.o, $(PROJECT_SOURCE_FILES))
+OBJS = $(patsubst %.cpp,%.o,$(patsubst %.c,%.o,$(PROJECT_SOURCE_FILES)))
 
 # Define processes to execute
 #------------------------------------------------------------------------------------------------
@@ -352,6 +358,9 @@ $(PROJECT_NAME): $(OBJS)
 
 # Compile source files
 # NOTE: This pattern will compile every module defined on $(OBJS)
+%.o: %.cpp
+	$(CC) -c $< -o $@ $(CFLAGS) $(INCLUDE_PATHS) -D$(PLATFORM)
+
 %.o: %.c
 	$(CC) -c $< -o $@ $(CFLAGS) $(INCLUDE_PATHS) -D$(PLATFORM)
 
@@ -363,7 +372,7 @@ ifeq ($(PLATFORM),PLATFORM_DESKTOP)
     endif
     ifeq ($(PLATFORM_OS),LINUX)
 	find . -type f -executable -delete
-	rm -fv *.o
+	rm -fv *.o $(OBJS)
     endif
     ifeq ($(PLATFORM_OS),OSX)
 	rm -f *.o external/*.o $(PROJECT_NAME)

@@ -16,6 +16,7 @@
 #include "rlImGui.h"
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <print>
 #include <vector>
 
@@ -41,42 +42,104 @@ void DrawArrowedLine(const Vector2 from, const Vector2 to, Color color,
   DrawLineEx(from, to, 2, color);
 }
 
+class Component {
+public:
+  bool destroyed;
+  bool enabled{true};
+  class GameObject *owner = nullptr;
+  virtual ~Component() = default;
+  virtual void OnAttach() {}
+  virtual void OnDetach() {}
+  virtual void Update() {}
+  virtual void Draw() {}
+};
+
 class GameObject {
 public:
   GameObject() : pos{} {};
   virtual ~GameObject() = default;
   Vector2 pos;
   Vector2 size;
-  virtual void Update() = 0;
-  virtual void Draw() = 0;
+
   void DrawGizmos() {
     DrawRectangleV(pos, Vector2(20, 20), Color(22, 22, 100, 82));
     DrawArrowedLine(pos, pos + Vector2(100, 0), RED);
     DrawArrowedLine(pos, pos + Vector2(0, 100), BLUE);
   }
+  std::vector<std::unique_ptr<Component>> components;
+
+  template <typename T, typename... Args> T *AddComponent(Args &&...args) {
+    auto c = std::make_unique<T>(std::forward<Args>(args)...);
+    c->owner = this;
+    c->OnAttach();
+    T *ptr = c.get();
+    components.push_back(std::move(c));
+    return ptr;
+  }
+
+  template <typename T> T *GetComponent() {
+    for (auto &c : components)
+      if (auto t = dynamic_cast<T *>(c.get()))
+        return t;
+    return nullptr;
+  }
+
+  template <typename T> void RemoveComponent() {
+    for (auto &c : components) {
+      if (dynamic_cast<T *>(c.get())) {
+        c->destroyed = true;
+        return;
+      }
+    }
+  }
+
+  void RemoveComponent(Component *target) {
+    if (target)
+      target->destroyed = true;
+  }
+
+  void Update() {
+    for (auto &c : components)
+      if (c->enabled && !c->destroyed)
+        c->Update();
+
+    SweepDestroyed();
+  }
+
+  void Draw() {
+    for (auto &c : components)
+      if (c->enabled && !c->destroyed)
+        c->Draw();
+  }
+
+private:
+  void SweepDestroyed() {
+    for (auto &c : components) {
+      if (c->destroyed)
+        c->OnDetach();
+    }
+    components.erase(std::remove_if(components.begin(), components.end(),
+                                    [](const std::unique_ptr<Component> &c) {
+                                      return c->destroyed;
+                                    }),
+                     components.end());
+  }
 };
 
-class DNDSystem {
-  bool isEnabled;
+class DNDComponent : public Component {
   bool isDrag;
   Vector2 dragMouseStart;
   Vector2 dragMouseOffset;
-  GameObject *curEntity;
 
 public:
-  Vector2 size;
+  DNDComponent() : isDrag{}, dragMouseStart{}, dragMouseOffset{} {};
 
-  DNDSystem(GameObject *_curEntity)
-      : isEnabled(true), isDrag{}, dragMouseStart{}, dragMouseOffset{},
-        curEntity(_curEntity), size{} {};
-
-  void Update() {
-    if (!isEnabled)
-      return;
-    const Vector2 pos{curEntity->pos};
+  void Update() override {
+    const Vector2 pos{owner->pos};
     const Vector2 mousePos{GetScreenToWorld2D(GetMousePosition(), camera)};
-    const bool isHover = mousePos.x > pos.x && mousePos.x < pos.x + size.x &&
-                         mousePos.y > pos.y && mousePos.y < pos.y + size.y;
+    const bool isHover =
+        mousePos.x > pos.x && mousePos.x < pos.x + owner->size.x &&
+        mousePos.y > pos.y && mousePos.y < pos.y + owner->size.y;
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !isDrag && isHover) {
       isDrag = true;
@@ -85,7 +148,7 @@ public:
     }
 
     if (isDrag) {
-      curEntity->pos = mousePos - dragMouseOffset;
+      owner->pos = mousePos - dragMouseOffset;
     }
 
     if (isDrag && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -102,27 +165,24 @@ public:
   }
 };
 
-class PacketsInput : public GameObject {
+class PacketsInputComponent : public Component {
 private:
-  long long lastTimeGen;
-  long long packetGenTimeout{1000};
   const int rows{7};
   const int cols{3};
+  const Vector2 textPadding{0, 20};
+  const Vector2 padding{20, 20};
+  const int gap{20};
   int curPackets;
   int maxPackets{rows * cols};
-  DNDSystem dndSystem;
+  long long lastTimeGen;
+  long long packetGenTimeout{1000};
 
 public:
-  PacketsInput()
-      : GameObject(), lastTimeGen(get_time_ms()), curPackets{},
-        dndSystem(this) {
-    size = {200, 200};
-    dndSystem.size = size;
-  };
+  PacketsInputComponent() : curPackets{}, lastTimeGen(get_time_ms()) {};
 
-  void Update() {
-    dndSystem.Update();
+  void OnAttach() override { owner->size = {200, 200}; }
 
+  void Update() override {
     if (curPackets < maxPackets &&
         get_time_ms() - lastTimeGen >= packetGenTimeout) {
       lastTimeGen = get_time_ms();
@@ -130,10 +190,9 @@ public:
     }
   }
 
-  void Draw() {
-    const Vector2 textPadding{0, 20};
-    const Vector2 padding{20, 20};
-    const int gap{20};
+  void Draw() override {
+    const auto &size = owner->size;
+    const auto &pos = owner->pos;
     const Vector2 itemSize{(size.x - 2 * padding.x - (cols - 1) * gap) / cols,
                            (size.y - 2 * padding.y - (rows - 1) * gap) / rows};
     DrawRectangleLines(pos.x, pos.y, size.x, size.y, GREEN);
@@ -158,37 +217,69 @@ public:
   }
 };
 
-class Processor : public GameObject {
+class ProcessorComponent : public Component {
 private:
-  DNDSystem dndSystem;
-
 public:
-  Processor() : GameObject(), dndSystem(this) {
-    size = {150, 150};
-    dndSystem.size = size;
-  };
+  ProcessorComponent() = default;
 
-  void Update() { dndSystem.Update(); }
+  void OnAttach() override { owner->size = {150, 150}; }
 
-  void Draw() {
+  void Draw() override {
     const double padding{20};
-    DrawRectangleV(pos, size, GREEN);
-    DrawText("Processor", pos.x, pos.y + size.y + padding, 20, GRAY);
+    DrawRectangleV(owner->pos, owner->size, GREEN);
+    DrawText("Processor", owner->pos.x, owner->pos.y + owner->size.y + padding,
+             20, GRAY);
   };
 };
 
-class InventoryPanel : public GameObject {
-private:
+std::vector<std::unique_ptr<GameObject>> entities;
+std::vector<std::unique_ptr<GameObject>> guiEntities;
+
+class ItemFactory {
 public:
-  struct ItemConfig {
-    GameObject *item;
-    int price;
+  using Creator = std::function<std::unique_ptr<GameObject>()>;
+
+  static ItemFactory &Instance() {
+    static ItemFactory instance;
+    return instance;
   };
-  std::vector<ItemConfig> items;
+
+  void Register(const std::string &id, Creator creator) {
+    creators[id] = std::move(creator);
+  };
+
+  std::unique_ptr<GameObject> Create(const std::string &id) {
+    auto it = creators.find(id);
+    return it != creators.end() ? it->second() : nullptr;
+  };
+
+private:
+  std::unordered_map<std::string, Creator> creators;
+};
+
+struct ShopItem {
+  std::string id;
+  int price;
+};
+
+class InventoryPanelComponent : public Component {
+public:
+  std::vector<GameObject *> items;
+  std::vector<ShopItem> configs;
   float gap{20};
   int padding{20};
 
-  InventoryPanel() : GameObject(), items{} {};
+  InventoryPanelComponent() : items{} {};
+
+  void AddShopItem(ShopItem config) {
+    // auto previewItem = ItemFactory::Instance().Create(config.id);
+    // auto preview = std::make_unique<PreviewItem>(previewItem.get());
+    // previewItem->size = {150, 150};
+    // items.push_back(previewItem.get());
+    // configs.push_back(config);
+    // guiEntities.push_back(std::move(previewItem));
+    // guiEntities.push_back(std::move(preview));
+  };
 
   void Update() {
     int totalW{};
@@ -197,22 +288,27 @@ public:
     int screenH = GetScreenHeight();
 
     for (const auto &item : items) {
-      totalW += item.item->size.x;
-      maxH = std::max(maxH, item.item->size.y);
+      totalW += item->size.x;
+      maxH = std::max(maxH, item->size.y);
     }
 
-    size = {static_cast<float>(totalW) + (items.size() - 1) * gap + padding * 2,
-            maxH + padding * 2 + 30};
-    pos = {screenW / 2.0f - size.x / 2, screenH - size.y - 20};
+    owner->size = {static_cast<float>(totalW) + (items.size() - 1) * gap +
+                       padding * 2,
+                   maxH + padding * 2 + 30};
+    owner->pos = {screenW / 2.0f - owner->size.x / 2,
+                  screenH - owner->size.y - 20};
 
-    float lastX{pos.x + padding};
+    float lastX{owner->pos.x + padding};
     for (size_t i{}; i < items.size(); ++i) {
-      items[i].item->pos = {lastX, pos.y + padding};
-      lastX += gap + items[i].item->size.x;
+      items[i]->pos = {lastX, owner->pos.y + padding};
+      lastX += gap + items[i]->size.x;
     }
   }
 
-  void Draw() { DrawRectangleLines(pos.x, pos.y, size.x, size.y, GREEN); };
+  void Draw() {
+    DrawRectangleLines(owner->pos.x, owner->pos.y, owner->size.x, owner->size.y,
+                       GREEN);
+  };
 };
 
 class GameState {
@@ -227,17 +323,15 @@ private:
   GameState() = default;
 };
 
-class HUD : public GameObject {
+class HUDComponent : public Component {
 private:
   Vector2 padding{20, 20};
   int fontSize{20};
 
 public:
-  HUD() : GameObject() {};
+  void Update() override {};
 
-  void Update() {}
-
-  void Draw() {
+  void Draw() override {
     int screenW{GetScreenWidth()};
     std::string moneyText{std::format("${}", GameState::Get().playerMoney)};
 
@@ -250,8 +344,6 @@ public:
 // Global Variables Definition (local to this module)
 //----------------------------------------------------------------------------------
 
-std::vector<std::unique_ptr<GameObject>> entities;
-std::vector<std::unique_ptr<GameObject>> guiEntities;
 //----------------------------------------------------------------------------------
 // Module Functions Declaration
 //----------------------------------------------------------------------------------
@@ -321,39 +413,15 @@ static void UpdateDrawFrame(void) {
   //----------------------------------------------------------------------------------
 };
 
-struct ShopItem {
-  std::string id;
-  int price;
-};
-
-class ItemFactory {
-public:
-  using Creator = std::function<std::unique_ptr<GameObject>()>;
-
-  static ItemFactory &Instance() {
-    static ItemFactory instance;
-    return instance;
-  };
-
-  void Register(const std::string &id, Creator creator) {
-    creators[id] = std::move(creator);
-  };
-
-  std::unique_ptr<GameObject> Create(const std::string &id) {
-    auto it = creators.find(id);
-    return it != creators.end() ? it->second() : nullptr;
-  };
-
-private:
-  std::unordered_map<std::string, Creator> creators;
-};
-
 //----------------------------------------------------------------------------------
 // Program main entry point
 //----------------------------------------------------------------------------------
 int main() {
-  ItemFactory::Instance().Register(
-      "processor", [] { return std::make_unique<Processor>(); });
+  // ItemFactory::Instance().Register(
+  //     "processor", [] { return std::make_unique<Processor>(); });
+  // std::vector<ShopItem> shopItems{
+  //     {"processor", 20},
+  // };
 
   // Initialization
   //--------------------------------------------------------------------------------------
@@ -372,32 +440,31 @@ int main() {
   camera.rotation = 0.0f;
   camera.zoom = 1.0f;
 
-  auto packetsInput = std::make_unique<PacketsInput>();
-  auto processor = std::make_unique<Processor>();
+  auto packetsInput = std::make_unique<GameObject>();
+  packetsInput->AddComponent<PacketsInputComponent>();
+  packetsInput->AddComponent<DNDComponent>();
+
+  auto processor = std::make_unique<GameObject>();
+  processor->AddComponent<ProcessorComponent>();
+  processor->AddComponent<DNDComponent>();
 
   packetsInput->pos = {-300, 0};
   processor->pos = {100, 100};
 
+  auto hud = std::make_unique<GameObject>();
+  hud->AddComponent<HUDComponent>();
+
+  auto inventoryPanel = std::make_unique<GameObject>();
+  inventoryPanel->AddComponent<InventoryPanelComponent>();
+
+  // for (const auto &shopItem : shopItems)
+  //   inventoryPanel->AddShopItem(shopItem);
+
   entities.push_back(std::move(packetsInput));
   entities.push_back(std::move(processor));
 
-  guiEntities.push_back(std::make_unique<HUD>());
-
-  auto inventoryPanel = std::make_unique<InventoryPanel>();
-  auto processorGUI = std::make_unique<Processor>();
-  auto processorGUI2 = std::make_unique<Processor>();
-
-  processorGUI->size.x = 100;
-  processorGUI->size.y = 100;
-  processorGUI2->size.x = 100;
-  processorGUI2->size.y = 100;
-
-  inventoryPanel->items.emplace_back(processorGUI.get(), 20);
-  inventoryPanel->items.emplace_back(processorGUI2.get(), 40);
-
+  guiEntities.push_back(std::move(hud));
   guiEntities.push_back(std::move(inventoryPanel));
-  guiEntities.push_back(std::move(processorGUI));
-  guiEntities.push_back(std::move(processorGUI2));
 
 #if defined(PLATFORM_WEB)
   emscripten_set_main_loop(UpdateDrawFrame, 60, 1);
